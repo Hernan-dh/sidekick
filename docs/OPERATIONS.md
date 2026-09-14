@@ -6,6 +6,8 @@ Copy `.env.example` to `.env` and configure only the providers in use. Runtime r
 
 Python 3.12, `uv`, Node.js, and `npx` are expected. Run `uv sync`, then start the application with `uv run python app.py`.
 
+The interface detects Spanish or English from the browser and exposes a manual language selector. The theme button switches between light and dark palettes; the selection is stored locally in the browser. Clearing site storage resets the theme to the operating-system preference.
+
 ## Models and observability
 
 `SIDEKICK_PROVIDER_ORDER` controls runtime priority and defaults to `gemini,groq,openrouter`. Providers without credentials are skipped. `GEMINI_MODEL`, `GROQ_MODEL`, and `OPENROUTER_MODEL` select models independently. Both the tool-using worker and structured evaluator use the resulting fallback chain.

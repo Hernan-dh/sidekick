@@ -85,6 +85,7 @@ class Sidekick:
         self.paused = False
         self.pending_actions = 0
         self.todos = []
+        self.language = "English"
 
     async def setup(self):
         os.makedirs(SANDBOX, exist_ok=True)
@@ -131,22 +132,32 @@ The assistant's most recent reply was:
 
 Decide whether the success criteria are met, using the tool calls as evidence of what was actually done.
 Also decide whether the assistant needs more input from the user, either because it asked a question,
-needs clarification, or seems stuck. Give brief, concrete feedback."""
+needs clarification, or seems stuck. Give brief, concrete feedback in {self.language}."""
         return await self.evaluator.ainvoke(prompt)
 
-    async def run_turn(self, message: str, success_criteria: str, history: list) -> list:
+    async def run_turn(
+        self, message: str, success_criteria: str, history: list, language: str = "English"
+    ) -> list:
         """One turn of conversation: the worker attempts the task and the evaluator checks it,
         retrying with feedback up to MAX_ATTEMPTS. If the worker pauses for approval, this
         returns straight away with paused set, and resume() continues the same turn."""
         self.task = message
-        self.success_criteria = success_criteria or "The answer should be clear, correct and complete"
+        self.language = language if language in {"Español", "English"} else "English"
+        self.success_criteria = success_criteria or (
+            "La respuesta debe ser clara, correcta y completa"
+            if self.language == "Español"
+            else "The answer should be clear, correct and complete"
+        )
         self.attempts = 0
         self.todos = []
         payload = {
             "messages": [
                 {
                     "role": "user",
-                    "content": f"{message}\n\nThe success criteria for this task are: {self.success_criteria}",
+                    "content": (
+                        f"{message}\n\nThe success criteria for this task are: {self.success_criteria}"
+                        f"\nReply in {self.language} unless the user explicitly requests another language."
+                    ),
                 }
             ]
         }
@@ -169,7 +180,8 @@ needs clarification, or seems stuck. Give brief, concrete feedback."""
                 self.paused = True
                 self.pending_actions = len(actions)
                 described = "\n".join(action["description"] for action in actions)
-                return history + [{"role": "assistant", "content": f"Waiting for your approval:\n{described}"}]
+                prefix = "Esperando tu aprobación:" if self.language == "Español" else "Waiting for your approval:"
+                return history + [{"role": "assistant", "content": f"{prefix}\n{described}"}]
 
             self.paused = False
             reply = result["messages"][-1].content
@@ -181,7 +193,7 @@ needs clarification, or seems stuck. Give brief, concrete feedback."""
             if verdict.success_criteria_met or verdict.user_input_needed or self.attempts >= MAX_ATTEMPTS:
                 return history + [
                     {"role": "assistant", "content": reply},
-                    {"role": "assistant", "content": f"Evaluator: {verdict.feedback}"},
+                    {"role": "assistant", "content": f"{'Evaluador' if self.language == 'Español' else 'Evaluator'}: {verdict.feedback}"},
                 ]
             payload = {
                 "messages": [
