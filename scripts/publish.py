@@ -191,6 +191,7 @@ def main() -> None:
     if arguments.preview:
         print("\nPreview: no files were staged, committed, or pushed.")
         return
+    print(f"\nProposed title: {title}\nProposed description: {description}")
     if input("\nType PUBLISH to continue: ") != "PUBLISH":
         raise SystemExit("Publishing cancelled.")
     subprocess.run([*GIT, "add", "--", *paths], check=True)

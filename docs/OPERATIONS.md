@@ -61,7 +61,7 @@ Preview verification and generated Conventional Commit metadata without staging 
 python scripts/publish.py --preview
 ```
 
-Run `python scripts/publish.py` only after the user explicitly authorizes committing and pushing. The command lists included changes, verifies them, proposes an English Conventional Commit title and description, and requires typing `PUBLISH` before staging, re-verifying, committing, and pushing the current branch to `origin`. It never force-pushes.
+Run `python scripts/publish.py` only after the user explicitly authorizes committing and pushing. The command lists included changes, verifies them, proposes an English Conventional Commit title and description, and prints that proposal again immediately above the `PUBLISH` prompt. It requires typing `PUBLISH` before staging, re-verifying, committing, and pushing the current branch to `origin`. It never force-pushes.
 
 Proposal fallback order is Gemini, Groq, then OpenRouter, using credentials from the ignored `.env`. Override models with `GEMINI_COMMIT_MODELS`, `GROQ_COMMIT_MODEL`, or `OPENROUTER_COMMIT_MODEL`; override the 15-second request timeout with `COMMIT_GENERATION_TIMEOUT`. To avoid external generation, pass both `--title` and `--description`.
 
