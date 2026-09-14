@@ -2,7 +2,7 @@
 
 ## Local configuration
 
-Copy `.env.example` to `.env` and configure only the providers in use. Runtime requires at least one of `GEMINI_API_KEY`, `GROQ_API_KEY`, or `OPENROUTER_API_KEY`; web search needs `SERPER_API_KEY`, and push notifications need both Pushover values. Keep `.env` local and never paste its contents into logs, documentation, commits, or issues.
+Copy `.env.example` to `.env` and configure only the providers in use. Runtime requires at least one of `GEMINI_API_KEY`, `GROQ_API_KEY`, or `OPENROUTER_API_KEY`. DDGS web search needs no key; `SERPER_API_KEY` additionally enables Google results through Serper, and push notifications need both Pushover values. `DDGS_REGION` and `DDGS_BACKEND` are optional metasearch settings. Keep `.env` local and never paste its contents into logs, documentation, commits, or issues.
 
 Python 3.12, `uv`, Node.js, and `npx` are expected. Run `uv sync`, then start the application with `uv run python app.py`.
 
@@ -11,6 +11,8 @@ The interface detects Spanish or English from the browser and exposes a manual l
 ## Models and observability
 
 `SIDEKICK_PROVIDER_ORDER` controls runtime priority and defaults to `gemini,groq,openrouter`. Providers without credentials are skipped. `GEMINI_MODEL`, `GROQ_MODEL`, and `OPENROUTER_MODEL` select models independently. Both the tool-using worker and structured evaluator use the resulting fallback chain.
+
+Gemini may log that it ignores `$schema` or `additionalProperties` from MCP tool definitions: it safely reduces those schemas to the Gemini-supported subset. Sidekick keeps the provider that successfully takes over for the remainder of a task, minimizing cross-provider message conversion. If a later failure requires switching back to Gemini, Gemini may log that it drops foreign reasoning blocks; provider-specific reasoning is intentionally never replayed as Gemini reasoning. Neither message indicates task failure.
 
 LangSmith is optional. Add `LANGSMITH_API_KEY`, set `LANGSMITH_TRACING=true`, and optionally change `LANGSMITH_PROJECT` (default `sidekick`). Traces can contain prompts, responses, and tool data; leave tracing disabled for sensitive workloads that must not reach LangSmith.
 

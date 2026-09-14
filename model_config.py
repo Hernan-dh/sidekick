@@ -36,7 +36,6 @@ def build_models(*, temperature: float = 0) -> ModelSet:
         available["gemini"] = ChatGoogleGenerativeAI(
             model=os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
             google_api_key=os.environ["GEMINI_API_KEY"],
-            temperature=temperature,
             max_retries=1,
         )
     if _configured("GROQ_API_KEY"):

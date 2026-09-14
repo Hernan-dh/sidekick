@@ -1,11 +1,13 @@
 """Tools for the Sidekick: a mix of MCP servers, ready-made LangChain tools and our own."""
 
 import asyncio
+import json
 import os
 from contextlib import AsyncExitStack
 
 import requests
 import wikipedia
+from ddgs import DDGS
 from dotenv import load_dotenv
 from langchain_community.tools import GoogleSerperRun, WikipediaQueryRun
 from langchain_community.utilities import GoogleSerperAPIWrapper, WikipediaAPIWrapper
@@ -18,9 +20,38 @@ load_dotenv(override=True)
 # Wikimedia rejects the wikipedia library's default user agent, so identify ourselves properly
 wikipedia.set_user_agent("agentic-track-course (https://edwarddonner.com)")
 
-search = GoogleSerperRun(api_wrapper=GoogleSerperAPIWrapper())
-
 wikipedia_lookup = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
+
+
+def _format_ddgs_results(results: list[dict]) -> str:
+    """Keep search output compact enough for an agent context window."""
+    return json.dumps(
+        [
+            {"title": item.get("title", ""), "url": item.get("href", ""), "snippet": item.get("body", "")}
+            for item in results[:5]
+        ],
+        ensure_ascii=False,
+    )
+
+
+@tool
+def search_web_ddgs(query: str) -> str:
+    """Search the public web through DDGS metasearch. No API key is required."""
+    results = DDGS(timeout=10).text(
+        query,
+        region=os.getenv("DDGS_REGION", "wt-wt"),
+        safesearch="moderate",
+        max_results=5,
+        backend=os.getenv("DDGS_BACKEND", "auto"),
+    )
+    return _format_ddgs_results(results)
+
+
+def optional_serper_search():
+    """Create Google search only when its separate Serper credential is available."""
+    if not os.getenv("SERPER_API_KEY", "").strip():
+        return None
+    return GoogleSerperRun(api_wrapper=GoogleSerperAPIWrapper())
 
 
 @tool
@@ -99,5 +130,7 @@ async def get_all_tools(sandbox: str):
     """Return the full tool list (our tools plus the MCP server tools) and the session holder."""
     sessions = McpSessions(mcp_connections(sandbox))
     mcp_tools = await sessions.start()
-    our_tools = [search, send_push_notification, wikipedia_lookup, request_human_help]
+    our_tools = [search_web_ddgs, wikipedia_lookup, send_push_notification, request_human_help]
+    if search := optional_serper_search():
+        our_tools.insert(0, search)
     return our_tools + mcp_tools, sessions

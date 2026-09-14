@@ -17,13 +17,14 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
     HumanInTheLoopMiddleware,
-    ModelFallbackMiddleware,
     ModelCallLimitMiddleware,
     PIIMiddleware,
     TodoListMiddleware,
 )
 from langchain_core.messages import ToolMessage
+from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from model_config import build_models, build_structured_evaluator
@@ -34,6 +35,43 @@ load_dotenv(override=True)
 HERE = os.path.dirname(os.path.abspath(__file__))
 SANDBOX = os.path.join(HERE, "sandbox")
 MAX_ATTEMPTS = 3
+
+
+def initial_plan(language: str) -> list[dict[str, str]]:
+    """Provide a visible plan even if the model declines the optional todo tool."""
+    if language == "Español":
+        items = (
+            "Analizar la solicitud y los criterios de éxito",
+            "Investigar la información o ejecutar las acciones necesarias",
+            "Sintetizar los resultados y preparar la respuesta",
+            "Verificar que la respuesta cumpla los criterios",
+        )
+    else:
+        items = (
+            "Analyze the request and success criteria",
+            "Research information or perform the required actions",
+            "Synthesize the results and prepare the response",
+            "Verify that the response meets the success criteria",
+        )
+    return [
+        {"content": item, "status": "in_progress" if index == 0 else "pending"}
+        for index, item in enumerate(items)
+    ]
+
+
+def complete_plan(todos: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [{**todo, "status": "completed"} for todo in todos]
+
+
+def move_to_review(todos: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Show that execution ended and Sidekick is checking its result."""
+    if not todos:
+        return todos
+    updated = [{**todo} for todo in todos]
+    for todo in updated[:-1]:
+        todo["status"] = "completed"
+    updated[-1]["status"] = "in_progress"
+    return updated
 
 
 class EvaluatorOutput(BaseModel):
@@ -71,6 +109,44 @@ class TolerateToolErrors(AgentMiddleware):
             )
 
 
+class StickyModelFallbackMiddleware(AgentMiddleware):
+    """Keep the provider that successfully takes over for the current task.
+
+    LangChain's built-in fallback retries one model call, then starts from the
+    primary provider again on the next tool-loop step. This middleware preserves
+    the successful provider for the rest of a task, so its conversation and tool
+    context continue without unnecessary cross-provider conversion.
+    """
+
+    def __init__(self, primary: BaseChatModel, *fallbacks: BaseChatModel) -> None:
+        super().__init__()
+        self.models = (primary, *fallbacks)
+        self.active_model: BaseChatModel | None = None
+
+    def reset(self) -> None:
+        """Start the next user task with the configured primary provider."""
+        self.active_model = None
+
+    async def awrap_model_call(self, request, handler):
+        candidates = (
+            (self.active_model, *(model for model in self.models if model is not self.active_model))
+            if self.active_model is not None
+            else self.models
+        )
+        last_error: Exception | None = None
+        for model in candidates:
+            try:
+                response = await handler(request.override(model=model))
+                self.active_model = model
+                return response
+            except GraphBubbleUp:
+                raise
+            except Exception as error:
+                last_error = error
+        assert last_error is not None
+        raise last_error
+
+
 class Sidekick:
     def __init__(self):
         self.sidekick_id = str(uuid.uuid4())
@@ -86,6 +162,7 @@ class Sidekick:
         self.pending_actions = 0
         self.todos = []
         self.language = "English"
+        self.fallback_middleware = None
 
     async def setup(self):
         os.makedirs(SANDBOX, exist_ok=True)
@@ -102,7 +179,8 @@ class Sidekick:
             ),
         ]
         if models.fallbacks:
-            middleware.insert(1, ModelFallbackMiddleware(*models.fallbacks))
+            self.fallback_middleware = StickyModelFallbackMiddleware(models.primary, *models.fallbacks)
+            middleware.insert(1, self.fallback_middleware)
         self.worker = create_agent(
             model=models.primary,
             tools=self.tools,
@@ -142,6 +220,8 @@ needs clarification, or seems stuck. Give brief, concrete feedback in {self.lang
         retrying with feedback up to MAX_ATTEMPTS. If the worker pauses for approval, this
         returns straight away with paused set, and resume() continues the same turn."""
         self.task = message
+        if self.fallback_middleware:
+            self.fallback_middleware.reset()
         self.language = language if language in {"Español", "English"} else "English"
         self.success_criteria = success_criteria or (
             "La respuesta debe ser clara, correcta y completa"
@@ -149,7 +229,7 @@ needs clarification, or seems stuck. Give brief, concrete feedback in {self.lang
             else "The answer should be clear, correct and complete"
         )
         self.attempts = 0
-        self.todos = []
+        self.todos = initial_plan(self.language)
         payload = {
             "messages": [
                 {
@@ -173,7 +253,10 @@ needs clarification, or seems stuck. Give brief, concrete feedback in {self.lang
         while True:
             result = None
             async for result in self.worker.astream(payload, config=config, stream_mode="values"):
-                self.todos = result.get("todos", self.todos)
+                # TodoListMiddleware leaves this field empty until the model calls
+                # write_todos. Preserve our visible plan in that common case.
+                if agent_todos := result.get("todos"):
+                    self.todos = agent_todos
 
             if "__interrupt__" in result:
                 actions = result["__interrupt__"][0].value["action_requests"]
@@ -185,12 +268,15 @@ needs clarification, or seems stuck. Give brief, concrete feedback in {self.lang
 
             self.paused = False
             reply = result["messages"][-1].content
+            self.todos = move_to_review(self.todos)
             tools_used = [
                 call["name"] for m in result["messages"] for call in (getattr(m, "tool_calls", None) or [])
             ]
             self.attempts += 1
             verdict = await self.evaluate(self.task, self.success_criteria, reply, tools_used)
             if verdict.success_criteria_met or verdict.user_input_needed or self.attempts >= MAX_ATTEMPTS:
+                if verdict.success_criteria_met:
+                    self.todos = complete_plan(self.todos)
                 return history + [
                     {"role": "assistant", "content": reply},
                     {"role": "assistant", "content": f"{'Evaluador' if self.language == 'Español' else 'Evaluator'}: {verdict.feedback}"},

@@ -18,7 +18,7 @@ REQUIRED = (
 )
 PRIVATE_NAMES = {".env", "credentials.json", "secrets.json", "secrets.yaml", "id_rsa", "id_ed25519"}
 PRIVATE_SUFFIXES = {".key", ".pem", ".p12", ".pfx"}
-GENERATED_PARTS = {".venv", "venv", "__pycache__", ".pytest_cache", "node_modules", "sandbox"}
+GENERATED_PARTS = {".venv", "venv", "__pycache__", ".pytest_cache", "node_modules", "sandbox", ".playwright-mcp"}
 TEXT_SUFFIXES = {".css", ".env", ".html", ".ini", ".js", ".json", ".md", ".py", ".sh", ".toml", ".txt", ".yaml", ".yml"}
 TEXT_NAMES = {".env.example", ".gitattributes", ".gitignore", "AGENTS.md", "Dockerfile", "pre-commit"}
 SECRET_PATTERNS = (
