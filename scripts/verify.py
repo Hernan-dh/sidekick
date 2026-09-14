@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 import subprocess
 import sys
@@ -110,9 +111,12 @@ def main() -> int:
             checks.error(f"Missing essential documentation: {relative}")
     check_python(checks, files)
     check_files(checks, files)
+    if (ROOT / "uv.lock").is_file() and not os.getenv("CI"):
+        checks.run("locked dependencies", ["uv", "lock", "--check"])
     tests = [path for path in files if path.name.startswith("test_") and path.suffix == ".py"]
     if tests:
-        checks.run("tests", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"])
+        test_python = ["uv", "run", "python"] if (ROOT / "uv.lock").is_file() else [sys.executable]
+        checks.run("tests", [*test_python, "-m", "unittest", "discover", "-s", "tests", "-v"])
     else:
         print("[check] tests (none discovered; skipped)")
     if checks.errors:

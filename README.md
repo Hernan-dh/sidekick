@@ -4,15 +4,16 @@ A personal AI coworker with a Gradio interface, an evaluator loop, web and files
 
 ## Run locally
 
-Python 3.12 and `uv` are the development baseline. Create the environment and install the application dependencies, then copy `.env.example` to `.env` and replace only the required placeholders. Never commit `.env`.
+Python 3.12 and `uv` are the development baseline. Synchronize the locked environment, then copy `.env.example` to `.env` and replace only the required placeholders. Never commit `.env`.
 
 ```sh
-uv venv --python 3.12
-uv pip install gradio langchain langchain-openai langchain-community langchain-mcp-adapters langgraph python-dotenv requests wikipedia python-pptx
-uv run --no-project python app.py
+uv sync
+uv run python app.py
 ```
 
 The browser and sandbox filesystem tools start through `npx`, so Node.js must also be available.
+
+Sidekick uses the configured providers in `SIDEKICK_PROVIDER_ORDER` (Gemini, Groq, then OpenRouter by default), skipping providers without keys and falling back when a model request fails. Add `LANGSMITH_API_KEY` and set `LANGSMITH_TRACING=true` to record LangChain/LangGraph traces in the `sidekick` project.
 
 ## Documentation and publication
 

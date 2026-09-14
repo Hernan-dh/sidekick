@@ -13,11 +13,11 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
     HumanInTheLoopMiddleware,
+    ModelFallbackMiddleware,
     ModelCallLimitMiddleware,
     PIIMiddleware,
     TodoListMiddleware,
@@ -26,6 +26,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
+from model_config import build_models, build_structured_evaluator
 from sidekick_tools import get_all_tools
 
 load_dotenv(override=True)
@@ -88,23 +89,28 @@ class Sidekick:
     async def setup(self):
         os.makedirs(SANDBOX, exist_ok=True)
         self.tools, self.sessions = await get_all_tools(SANDBOX)
+        models = build_models()
+        middleware = [
+            TolerateToolErrors(),
+            TodoListMiddleware(),
+            PIIMiddleware("email"),
+            PIIMiddleware("credit_card", apply_to_tool_results=True),
+            ModelCallLimitMiddleware(run_limit=30),
+            HumanInTheLoopMiddleware(
+                interrupt_on={"send_push_notification": True, "request_human_help": True}
+            ),
+        ]
+        if models.fallbacks:
+            middleware.insert(1, ModelFallbackMiddleware(*models.fallbacks))
         self.worker = create_agent(
-            model="openai:gpt-5.4-mini",
+            model=models.primary,
             tools=self.tools,
             system_prompt=f"{WORKER_PROMPT}\nToday is {datetime.now():%A %d %B %Y}.",
-            middleware=[
-                TolerateToolErrors(),
-                TodoListMiddleware(),
-                PIIMiddleware("email"),
-                PIIMiddleware("credit_card", apply_to_tool_results=True),
-                ModelCallLimitMiddleware(run_limit=30),
-                HumanInTheLoopMiddleware(
-                    interrupt_on={"send_push_notification": True, "request_human_help": True}
-                ),
-            ],
+            middleware=middleware,
             checkpointer=self.memory,
         )
-        self.evaluator = ChatOpenAI(model="gpt-5.4-mini").with_structured_output(EvaluatorOutput)
+        self.evaluator = build_structured_evaluator(EvaluatorOutput)
+        self.providers = models.providers
 
     async def evaluate(
         self, message: str, success_criteria: str, last_reply: str, tools_used: list[str]

@@ -1,0 +1,28 @@
+[project]
+name = "sidekick"
+version = "0.1.0"
+description = "A LangChain and LangGraph personal coworker with LangSmith observability."
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "gradio>=6,<7",
+  "langchain>=1.4,<2",
+  "langchain-community>=0.4,<0.5",
+  "langchain-google-genai>=4,<5",
+  "langchain-groq>=1,<2",
+  "langchain-mcp-adapters>=0.2,<0.3",
+  "langchain-openrouter>=0.1,<0.2",
+  "langgraph>=1,<2",
+  "langsmith>=0.7,<1",
+  "mcp>=1.9,<2",
+  "pydantic>=2.12,<3",
+  "python-dotenv>=1.2,<2",
+  "python-pptx>=1,<2",
+  "requests>=2.32,<3",
+  "wikipedia>=1.4,<2",
+]
+
+[dependency-groups]
+dev = []
+
+[tool.uv]
+package = false

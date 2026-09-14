@@ -2,16 +2,34 @@
 
 ## Local configuration
 
-Copy `.env.example` to `.env` and configure only the providers in use. At minimum, runtime needs the model credentials expected by LangChain; web search needs `SERPER_API_KEY`, and push notifications need both Pushover values. Keep `.env` local and never paste its contents into logs, documentation, commits, or issues.
+Copy `.env.example` to `.env` and configure only the providers in use. Runtime requires at least one of `GEMINI_API_KEY`, `GROQ_API_KEY`, or `OPENROUTER_API_KEY`; web search needs `SERPER_API_KEY`, and push notifications need both Pushover values. Keep `.env` local and never paste its contents into logs, documentation, commits, or issues.
 
-Python 3.12, `uv`, Node.js, and `npx` are expected. Start the application with `uv run --no-project python app.py` after installing the dependencies listed in the README.
+Python 3.12, `uv`, Node.js, and `npx` are expected. Run `uv sync`, then start the application with `uv run python app.py`.
+
+## Models and observability
+
+`SIDEKICK_PROVIDER_ORDER` controls runtime priority and defaults to `gemini,groq,openrouter`. Providers without credentials are skipped. `GEMINI_MODEL`, `GROQ_MODEL`, and `OPENROUTER_MODEL` select models independently. Both the tool-using worker and structured evaluator use the resulting fallback chain.
+
+LangSmith is optional. Add `LANGSMITH_API_KEY`, set `LANGSMITH_TRACING=true`, and optionally change `LANGSMITH_PROJECT` (default `sidekick`). Traces can contain prompts, responses, and tool data; leave tracing disabled for sensitive workloads that must not reach LangSmith.
+
+Validate every configured provider with one minimal request:
+
+```sh
+uv run python scripts/check_providers.py
+```
+
+Validate graph construction and MCP startup without serving Gradio:
+
+```sh
+uv run python scripts/smoke_test.py
+```
 
 ## Verification and hooks
 
 Run the centralized checks from the repository root:
 
 ```sh
-python scripts/verify.py
+uv run python scripts/verify.py
 # or on Linux/macOS/Git Bash
 ./scripts/verify.sh
 ```
