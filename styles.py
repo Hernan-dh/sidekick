@@ -78,6 +78,13 @@ body > [data-radix-popper-content-wrapper] [role='option'][data-highlighted] {
 #plan-panel li.in_progress .plan-mark { border-color:var(--blue); background:var(--blue); }
 #plan-panel li.completed { color:var(--muted); text-decoration:line-through; }
 #plan-panel li.completed .plan-mark { border-color:var(--acid); background:var(--acid); }
+#work-status { min-height:28px; margin:12px 0 -12px!important; }
+.work-status { display:inline-flex; align-items:center; gap:8px; color:var(--muted); font:400 11px var(--mono); letter-spacing:.04em; }
+.work-status span { width:8px; height:8px; background:var(--blue); }
+.work-status.planning span,.work-status.reviewing span { background:var(--acid); }
+.work-status.awaiting_approval span { background:var(--orange); }
+.work-status.complete span { background:var(--acid); }
+.work-status.timed_out span,.work-status.failed span { background:var(--orange); }
 
 #ask-panel { gap:0!important; margin-top:24px!important; border:1px solid var(--border)!important; background:var(--surface)!important; }
 #ask-panel>div { gap:0!important; }

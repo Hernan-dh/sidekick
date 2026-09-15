@@ -1,6 +1,7 @@
 """Bilingual Gradio app for Sidekick. Run with: uv run python app.py"""
 
 import html
+import time
 import gradio as gr
 import styles
 from sidekick import Sidekick
@@ -14,6 +15,7 @@ UI_TEXT = {
         "message": "¿Qué querés que haga Sidekick?",
         "criteria": "¿Cómo sabremos que la tarea está terminada?",
         "reset": "Reiniciar", "approve": "Aprobar y continuar", "go": "Comenzar", "theme": "Tema",
+        "status": {"planning": "Preparando el plan", "working": "Trabajando", "reviewing": "Verificando el resultado", "awaiting_approval": "Esperando tu aprobación", "timed_out": "Tiempo límite alcanzado", "failed": "La ejecución se detuvo", "complete": "Tarea completada"},
     },
     "English": {
         "eyebrow": "Your personal coworker",
@@ -22,6 +24,7 @@ UI_TEXT = {
         "message": "What would you like Sidekick to do?",
         "criteria": "How will we know the task is complete?",
         "reset": "Reset", "approve": "Approve and continue", "go": "Start", "theme": "Theme",
+        "status": {"planning": "Preparing the plan", "working": "Working", "reviewing": "Reviewing the result", "awaiting_approval": "Waiting for your approval", "timed_out": "Time limit reached", "failed": "Execution stopped", "complete": "Task completed"},
     },
 }
 
@@ -58,6 +61,21 @@ def render_todos(todos, language="English"):
     return f"<h3>{html.escape(text['plan'])}</h3>{items}"
 
 
+def render_status(sidekick, language="English"):
+    if not sidekick or sidekick.activity == "idle":
+        return ""
+    text = text_for(language)
+    activity = sidekick.activity
+    if activity.startswith("tool:"):
+        tool_name = activity.split(":", 1)[1].replace("_", " ")
+        label = f"Usando {tool_name}" if language == "Español" else f"Using {tool_name}"
+    else:
+        label = text["status"].get(activity, text["status"]["working"])
+    elapsed = int(time.monotonic() - sidekick.started_at) if sidekick.started_at else 0
+    duration = f" · {elapsed}s" if sidekick.started_at else ""
+    return f'<div class="work-status {html.escape(activity)}"><span></span>{html.escape(label)}{duration}</div>'
+
+
 def localized_ui(language: str):
     text = text_for(language)
     return (
@@ -90,8 +108,11 @@ async def approve(sidekick, history):
     return results, gr.update(visible=sidekick.paused), sidekick
 
 
-def watch_todos(sidekick, language):
-    return render_todos(sidekick.todos if sidekick else [], language)
+def watch_progress(sidekick, language):
+    return (
+        render_todos(sidekick.todos if sidekick else [], language),
+        render_status(sidekick, language),
+    )
 
 
 async def reset(sidekick):
@@ -124,6 +145,7 @@ with gr.Blocks(title="Sidekick", delete_cache=(3600, 86400)) as ui:
         chatbot = gr.Chatbot(show_label=False, height=430, scale=3, elem_id="sidekick-chat")
         with gr.Column(scale=1, min_width=230):
             todos_panel = gr.HTML(render_todos([], "English"), elem_id="plan-panel")
+    work_status = gr.HTML(elem_id="work-status")
     with gr.Group(elem_id="ask-panel"):
         message = gr.Textbox(
             show_label=False, placeholder=UI_TEXT["English"]["message"],
@@ -152,7 +174,12 @@ with gr.Blocks(title="Sidekick", delete_cache=(3600, 86400)) as ui:
         localized_ui, language,
         [header, message, success_criteria, reset_button, approve_button, go_button, theme_button],
     )
-    timer.tick(watch_todos, [sidekick, language], todos_panel, show_progress="hidden")
+    # This watcher must not wait behind a long-running agent execution; otherwise
+    # the plan and elapsed-time indicator would only refresh after it finishes.
+    timer.tick(
+        watch_progress, [sidekick, language], [todos_panel, work_status],
+        show_progress="hidden", queue=False,
+    )
     request_inputs = [sidekick, message, success_criteria, chatbot, language]
     request_outputs = [chatbot, approve_button, sidekick]
     message.submit(process_message, request_inputs, request_outputs)

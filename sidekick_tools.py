@@ -22,6 +22,35 @@ wikipedia.set_user_agent("agentic-track-course (https://edwarddonner.com)")
 
 wikipedia_lookup = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
 
+# MCP exposes a large catalogue. Sending every JSON Schema with every model call
+# exceeds the input allowance of some providers (for example, Groq's 8K TPM tier).
+# These are the operations Sidekick needs for ordinary web work and sandbox tasks.
+COMPACT_MCP_TOOL_NAMES = frozenset(
+    {
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_click",
+        "browser_type",
+        "browser_fill_form",
+        "browser_select_option",
+        "browser_press_key",
+        "browser_wait_for",
+        "browser_handle_dialog",
+        "browser_tabs",
+        "read_file",
+        "write_file",
+        "list_directory",
+        "create_directory",
+        "move_file",
+        "search_files",
+    }
+)
+
+
+def select_agent_tools(tools: list) -> list:
+    """Expose a compact, cross-provider-safe subset of MCP operations to the model."""
+    return [tool for tool in tools if tool.name in COMPACT_MCP_TOOL_NAMES]
+
 
 def _format_ddgs_results(results: list[dict]) -> str:
     """Keep search output compact enough for an agent context window."""
@@ -37,7 +66,8 @@ def _format_ddgs_results(results: list[dict]) -> str:
 @tool
 def search_web_ddgs(query: str) -> str:
     """Search the public web through DDGS metasearch. No API key is required."""
-    results = DDGS(timeout=10).text(
+    timeout = max(1, int(os.getenv("SIDEKICK_REQUEST_TIMEOUT", "10")))
+    results = DDGS(timeout=timeout).text(
         query,
         region=os.getenv("DDGS_REGION", "wt-wt"),
         safesearch="moderate",
@@ -60,6 +90,7 @@ def send_push_notification(text: str) -> str:
     response = requests.post(
         "https://api.pushover.net/1/messages.json",
         data={"token": os.getenv("PUSHOVER_TOKEN"), "user": os.getenv("PUSHOVER_USER"), "message": text},
+        timeout=max(1, int(os.getenv("SIDEKICK_REQUEST_TIMEOUT", "10"))),
     )
     response.raise_for_status()
     return "Notification sent"
@@ -127,10 +158,15 @@ class McpSessions:
 
 
 async def get_all_tools(sandbox: str):
-    """Return the full tool list (our tools plus the MCP server tools) and the session holder."""
+    """Return local tools and a compact MCP subset, plus the session holder."""
     sessions = McpSessions(mcp_connections(sandbox))
     mcp_tools = await sessions.start()
     our_tools = [search_web_ddgs, wikipedia_lookup, send_push_notification, request_human_help]
     if search := optional_serper_search():
         our_tools.insert(0, search)
-    return our_tools + mcp_tools, sessions
+    selected_mcp_tools = select_agent_tools(mcp_tools)
+    print(
+        f"[sidekick] loaded {len(selected_mcp_tools)}/{len(mcp_tools)} MCP tools for model context",
+        flush=True,
+    )
+    return our_tools + selected_mcp_tools, sessions

@@ -1,6 +1,7 @@
 """Tests for Sidekick interface localization and themes."""
 
 import unittest
+from types import SimpleNamespace
 
 import app
 
@@ -24,6 +25,14 @@ class InterfaceTests(unittest.TestCase):
     def test_theme_toggle_is_available(self) -> None:
         self.assertIn("toggleSidekickTheme", app.styles.JS)
         self.assertIn("data-sidekick-theme", app.styles.CSS)
+
+    def test_status_reports_active_tool_without_exposing_html(self) -> None:
+        sidekick = SimpleNamespace(activity="tool:web_search", started_at=None)
+
+        rendered = app.render_status(sidekick, "English")
+
+        self.assertIn("Using web search", rendered)
+        self.assertIn("work-status", rendered)
 
 
 if __name__ == "__main__":

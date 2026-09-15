@@ -26,6 +26,8 @@ model_config = None
 
 
 class RequestStub:
+    messages = []
+
     def override(self, **changes):
         return changes["model"]
 
@@ -48,7 +50,7 @@ class ModelConfigurationTests(unittest.TestCase):
         assert model_config is not None
         keys = {
             "GEMINI_API_KEY": "", "GROQ_API_KEY": "", "OPENROUTER_API_KEY": "",
-            "SIDEKICK_PROVIDER_ORDER": "gemini,groq,openrouter",
+            "SIDEKICK_PROVIDER_ORDER": "gemini,groq,openrouter", "SIDEKICK_GEMINI_MODELS": "",
         }
         with patch.dict(os.environ, keys, clear=False), self.assertRaises(RuntimeError):
             model_config.build_models()
@@ -57,12 +59,25 @@ class ModelConfigurationTests(unittest.TestCase):
         assert model_config is not None
         keys = {
             "GEMINI_API_KEY": "test-key", "GROQ_API_KEY": "", "OPENROUTER_API_KEY": "",
-            "SIDEKICK_PROVIDER_ORDER": "gemini,groq,openrouter",
+            "SIDEKICK_PROVIDER_ORDER": "gemini,groq,openrouter", "SIDEKICK_GEMINI_MODELS": "test-model",
         }
         with patch.dict(os.environ, keys, clear=False):
             models = model_config.build_models()
         self.assertEqual(models.providers, ("gemini",))
         self.assertEqual(models.fallbacks, ())
+        self.assertEqual(models.labels, ("gemini/test-model",))
+
+    def test_configured_model_list_preserves_order_and_removes_duplicates(self) -> None:
+        assert model_config is not None
+        self.assertEqual(
+            model_config.configured_models("SIDEKICK_TEST_MODELS", "TEST_MODEL", ("fallback",)),
+            ("fallback",),
+        )
+        with patch.dict(os.environ, {"SIDEKICK_TEST_MODELS": "first, second, first"}):
+            self.assertEqual(
+                model_config.configured_models("SIDEKICK_TEST_MODELS", "TEST_MODEL", ("fallback",)),
+                ("first", "second"),
+            )
 
 
 class StickyFallbackTests(unittest.IsolatedAsyncioTestCase):
@@ -91,6 +106,59 @@ class StickyFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await middleware.awrap_model_call(RequestStub(), next_handler), "continued response")
         self.assertEqual(attempted, [fallback])
 
+    async def test_rate_limited_provider_is_skipped_for_the_rest_of_the_task(self) -> None:
+        from sidekick import StickyModelFallbackMiddleware
+
+        groq, openrouter = object(), object()
+        middleware = StickyModelFallbackMiddleware(
+            groq, openrouter, provider_names=("groq", "openrouter")
+        )
+
+        async def successful_groq(model):
+            return "first response"
+
+        await middleware.awrap_model_call(RequestStub(), successful_groq)
+
+        class RateLimitError(Exception):
+            status_code = 429
+
+        attempted = []
+
+        async def change_provider(model):
+            attempted.append(model)
+            if model is groq:
+                raise RateLimitError("rate limit reached")
+            return "openrouter response"
+
+        self.assertEqual(await middleware.awrap_model_call(RequestStub(), change_provider), "openrouter response")
+        self.assertEqual(attempted, [groq, openrouter])
+        self.assertIn("groq", middleware.rate_limited_providers)
+
+        attempted.clear()
+        self.assertEqual(await middleware.awrap_model_call(RequestStub(), change_provider), "openrouter response")
+        self.assertEqual(attempted, [openrouter])
+
+    def test_cross_provider_messages_drop_reasoning_metadata(self) -> None:
+        from langchain_core.messages import AIMessage
+        from sidekick import cross_provider_messages
+
+        original = AIMessage(
+            content=[{"type": "reasoning", "text": "private chain"}, {"type": "text", "text": "answer"}],
+            additional_kwargs={"reasoning_content": "private chain", "safe": "kept"},
+        )
+        normalized = cross_provider_messages([original])[0]
+
+        self.assertEqual(normalized.content, [{"type": "text", "text": "answer"}])
+        self.assertEqual(normalized.additional_kwargs, {"safe": "kept"})
+
+    def test_recognizes_gemini_resource_exhausted_as_a_rate_limit(self) -> None:
+        from sidekick import is_rate_limit_error
+
+        class GoogleRateLimitError(Exception):
+            pass
+
+        self.assertTrue(is_rate_limit_error(GoogleRateLimitError("429 RESOURCE_EXHAUSTED: quota exceeded")))
+
 
 class VisiblePlanTests(unittest.TestCase):
     def test_initial_plan_starts_with_one_active_item(self) -> None:
@@ -104,6 +172,14 @@ class VisiblePlanTests(unittest.TestCase):
         from sidekick import complete_plan, initial_plan
 
         self.assertTrue(all(todo["status"] == "completed" for todo in complete_plan(initial_plan("English"))))
+
+    def test_error_detail_redacts_configured_keys(self) -> None:
+        from sidekick import safe_error_detail
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "private-token"}):
+            detail = safe_error_detail(RuntimeError("provider rejected private-token"))
+        self.assertNotIn("private-token", detail)
+        self.assertIn("[redacted]", detail)
 
     def test_rejects_non_conventional_title(self) -> None:
         with self.assertRaises(ValueError):

@@ -8,6 +8,7 @@ for human approval before sensitive actions.
 """
 
 import os
+import time
 import uuid
 from datetime import datetime
 
@@ -17,11 +18,10 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
     HumanInTheLoopMiddleware,
-    ModelCallLimitMiddleware,
     PIIMiddleware,
     TodoListMiddleware,
 )
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphBubbleUp
@@ -34,7 +34,57 @@ load_dotenv(override=True)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SANDBOX = os.path.join(HERE, "sandbox")
-MAX_ATTEMPTS = 3
+def safe_error_detail(error: Exception) -> str:
+    """Keep a compact diagnostic in the terminal without leaking configured keys."""
+    detail = str(error)
+    for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "SERPER_API_KEY"):
+        if secret := os.getenv(name):
+            detail = detail.replace(secret, "[redacted]")
+    return " ".join(detail.split())[:300]
+
+
+def is_rate_limit_error(error: Exception) -> bool:
+    """Recognize rate-limit responses without coupling Sidekick to one SDK."""
+    detail = str(error).lower()
+    error_name = type(error).__name__.lower()
+    return (
+        getattr(error, "status_code", None) == 429
+        or getattr(error, "code", None) == 429
+        or "ratelimit" in error_name
+        or "rate limit" in detail
+        or "resource_exhausted" in detail
+        or "quota" in detail
+    )
+
+
+def cross_provider_messages(messages: list) -> list:
+    """Remove provider-native reasoning metadata before a fallback model sees it.
+
+    Tool-call IDs and text remain intact, so the agent continues the same graph state.
+    """
+    normalized = []
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            normalized.append(message)
+            continue
+        additional = {
+            key: value
+            for key, value in message.additional_kwargs.items()
+            if key not in {"raw_tool_call_parts", "reasoning", "reasoning_content", "thought"}
+        }
+        content = message.content
+        if isinstance(content, list):
+            content = [
+                block
+                for block in content
+                if not (isinstance(block, dict) and block.get("type") in {"reasoning", "thinking"})
+            ]
+        normalized.append(
+            message.model_copy(
+                update={"content": content, "additional_kwargs": additional, "response_metadata": {}}
+            )
+        )
+    return normalized
 
 
 def initial_plan(language: str) -> list[dict[str, str]]:
@@ -118,31 +168,54 @@ class StickyModelFallbackMiddleware(AgentMiddleware):
     context continue without unnecessary cross-provider conversion.
     """
 
-    def __init__(self, primary: BaseChatModel, *fallbacks: BaseChatModel) -> None:
+    def __init__(
+        self, primary: BaseChatModel, *fallbacks: BaseChatModel, provider_names: tuple[str, ...] | None = None
+    ) -> None:
         super().__init__()
-        self.models = (primary, *fallbacks)
+        models = (primary, *fallbacks)
+        names = provider_names or tuple(f"provider_{index}" for index in range(len(models)))
+        if len(names) != len(models):
+            raise ValueError("provider_names must match the configured models")
+        self.models = tuple(zip(names, models, strict=True))
         self.active_model: BaseChatModel | None = None
+        self.active_provider: str | None = None
+        self.rate_limited_providers: set[str] = set()
 
     def reset(self) -> None:
         """Start the next user task with the configured primary provider."""
         self.active_model = None
+        self.active_provider = None
+        self.rate_limited_providers.clear()
 
     async def awrap_model_call(self, request, handler):
+        available = [(name, model) for name, model in self.models if name not in self.rate_limited_providers]
         candidates = (
-            (self.active_model, *(model for model in self.models if model is not self.active_model))
-            if self.active_model is not None
-            else self.models
+            [(self.active_provider, self.active_model)]
+            + [(name, model) for name, model in available if model is not self.active_model]
+            if self.active_model is not None and self.active_provider not in self.rate_limited_providers
+            else available
         )
         last_error: Exception | None = None
-        for model in candidates:
+        for provider, model in candidates:
             try:
-                response = await handler(request.override(model=model))
+                model_request = request.override(model=model)
+                if self.active_provider is not None and provider != self.active_provider:
+                    model_request = request.override(model=model, messages=cross_provider_messages(request.messages))
+                print(f"[models] trying {provider}", flush=True)
+                response = await handler(model_request)
                 self.active_model = model
+                self.active_provider = provider
+                print(f"[models] using {provider}", flush=True)
                 return response
             except GraphBubbleUp:
                 raise
             except Exception as error:
                 last_error = error
+                if is_rate_limit_error(error):
+                    self.rate_limited_providers.add(provider)
+                    print(f"[models] {provider} rate-limited; skipping it for this task", flush=True)
+                else:
+                    print(f"[models] {provider} failed ({type(error).__name__}); trying next", flush=True)
         assert last_error is not None
         raise last_error
 
@@ -163,6 +236,9 @@ class Sidekick:
         self.todos = []
         self.language = "English"
         self.fallback_middleware = None
+        self.activity = "idle"
+        self.started_at: float | None = None
+        self.last_error = ""
 
     async def setup(self):
         os.makedirs(SANDBOX, exist_ok=True)
@@ -173,13 +249,14 @@ class Sidekick:
             TodoListMiddleware(),
             PIIMiddleware("email"),
             PIIMiddleware("credit_card", apply_to_tool_results=True),
-            ModelCallLimitMiddleware(run_limit=30),
             HumanInTheLoopMiddleware(
                 interrupt_on={"send_push_notification": True, "request_human_help": True}
             ),
         ]
         if models.fallbacks:
-            self.fallback_middleware = StickyModelFallbackMiddleware(models.primary, *models.fallbacks)
+            self.fallback_middleware = StickyModelFallbackMiddleware(
+                models.primary, *models.fallbacks, provider_names=models.labels
+            )
             middleware.insert(1, self.fallback_middleware)
         self.worker = create_agent(
             model=models.primary,
@@ -216,9 +293,10 @@ needs clarification, or seems stuck. Give brief, concrete feedback in {self.lang
     async def run_turn(
         self, message: str, success_criteria: str, history: list, language: str = "English"
     ) -> list:
-        """One turn of conversation: the worker attempts the task and the evaluator checks it,
-        retrying with feedback up to MAX_ATTEMPTS. If the worker pauses for approval, this
-        returns straight away with paused set, and resume() continues the same turn."""
+        """Run one worker turn and report an evaluator verdict without repeating the task.
+
+        A human approval pauses this turn; resume() then continues the same graph state.
+        """
         self.task = message
         if self.fallback_middleware:
             self.fallback_middleware.reset()
@@ -230,6 +308,9 @@ needs clarification, or seems stuck. Give brief, concrete feedback in {self.lang
         )
         self.attempts = 0
         self.todos = initial_plan(self.language)
+        self.activity = "planning"
+        self.started_at = time.monotonic()
+        self.last_error = ""
         payload = {
             "messages": [
                 {
@@ -241,12 +322,34 @@ needs clarification, or seems stuck. Give brief, concrete feedback in {self.lang
                 }
             ]
         }
-        return await self._advance(payload, history + [{"role": "user", "content": message}])
+        return await self._run_with_budget(payload, history + [{"role": "user", "content": message}])
 
     async def resume(self, history: list) -> list:
         """Approve the actions the worker paused on, and continue the turn."""
         payload = Command(resume={"decisions": [{"type": "approve"}] * self.pending_actions})
-        return await self._advance(payload, history)
+        self.activity = "working"
+        self.started_at = time.monotonic()
+        return await self._run_with_budget(payload, history)
+
+    async def _run_with_budget(self, payload, history: list) -> list:
+        """Return a recoverable response if an agent, provider, or tool fails."""
+        try:
+            return await self._advance(payload, history)
+        except Exception as error:
+            self.activity = "failed"
+            self.last_error = type(error).__name__
+            print(f"[sidekick] task stopped ({self.last_error}): {safe_error_detail(error)}", flush=True)
+            message = (
+                "No pude completar la tarea por un problema de proveedor o herramienta. "
+                "Podés reintentarla; Sidekick conservará el contexto mostrado."
+                if self.language == "Español"
+                else "I could not complete the task because a provider or tool failed. "
+                "You can retry it; Sidekick keeps the displayed context."
+            )
+            return history + [{"role": "assistant", "content": message}]
+        finally:
+            if not self.paused:
+                self.started_at = None
 
     async def _advance(self, payload, history: list) -> list:
         config = {"configurable": {"thread_id": self.sidekick_id}}
@@ -257,10 +360,15 @@ needs clarification, or seems stuck. Give brief, concrete feedback in {self.lang
                 # write_todos. Preserve our visible plan in that common case.
                 if agent_todos := result.get("todos"):
                     self.todos = agent_todos
+                last_message = result.get("messages", [])[-1] if result.get("messages") else None
+                tool_calls = getattr(last_message, "tool_calls", None) or []
+                if tool_calls:
+                    self.activity = f"tool:{tool_calls[0]['name']}"
 
             if "__interrupt__" in result:
                 actions = result["__interrupt__"][0].value["action_requests"]
                 self.paused = True
+                self.activity = "awaiting_approval"
                 self.pending_actions = len(actions)
                 described = "\n".join(action["description"] for action in actions)
                 prefix = "Esperando tu aprobación:" if self.language == "Español" else "Waiting for your approval:"
@@ -268,28 +376,19 @@ needs clarification, or seems stuck. Give brief, concrete feedback in {self.lang
 
             self.paused = False
             reply = result["messages"][-1].content
+            self.activity = "reviewing"
             self.todos = move_to_review(self.todos)
             tools_used = [
                 call["name"] for m in result["messages"] for call in (getattr(m, "tool_calls", None) or [])
             ]
             self.attempts += 1
             verdict = await self.evaluate(self.task, self.success_criteria, reply, tools_used)
-            if verdict.success_criteria_met or verdict.user_input_needed or self.attempts >= MAX_ATTEMPTS:
-                if verdict.success_criteria_met:
-                    self.todos = complete_plan(self.todos)
-                return history + [
-                    {"role": "assistant", "content": reply},
-                    {"role": "assistant", "content": f"{'Evaluador' if self.language == 'Español' else 'Evaluator'}: {verdict.feedback}"},
-                ]
-            payload = {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": f"Your last response did not meet the success criteria. "
-                        f"Here is the feedback: {verdict.feedback}. Please keep working and address it.",
-                    }
-                ]
-            }
+            self.todos = complete_plan(self.todos)
+            self.activity = "complete"
+            return history + [
+                {"role": "assistant", "content": reply},
+                {"role": "assistant", "content": f"{'Evaluador' if self.language == 'Español' else 'Evaluator'}: {verdict.feedback}"},
+            ]
 
     def cleanup(self):
         """Shut down the MCP servers; the browser window closes."""

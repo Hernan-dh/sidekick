@@ -18,10 +18,23 @@ class ModelSet:
     primary: BaseChatModel
     fallbacks: tuple[BaseChatModel, ...]
     providers: tuple[str, ...]
+    labels: tuple[str, ...]
 
 
 def _configured(name: str) -> bool:
     return bool(os.getenv(name, "").strip())
+
+
+def configured_models(list_name: str, legacy_name: str, defaults: tuple[str, ...]) -> tuple[str, ...]:
+    """Read a comma-separated model chain, keeping legacy singular settings useful."""
+    configured = os.getenv(list_name, "").strip()
+    if configured:
+        models = tuple(item.strip() for item in configured.split(",") if item.strip())
+    elif legacy := os.getenv(legacy_name, "").strip():
+        models = (legacy, *defaults)
+    else:
+        models = defaults
+    return tuple(dict.fromkeys(models))
 
 
 def build_models(*, temperature: float = 0) -> ModelSet:
@@ -31,29 +44,56 @@ def build_models(*, temperature: float = 0) -> ModelSet:
     credentials are skipped, and startup fails clearly if none are configured.
     """
 
-    available: dict[str, BaseChatModel] = {}
+    available: dict[str, list[tuple[str, BaseChatModel]]] = {}
     if _configured("GEMINI_API_KEY"):
-        available["gemini"] = ChatGoogleGenerativeAI(
-            model=os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
-            google_api_key=os.environ["GEMINI_API_KEY"],
-            max_retries=1,
-        )
+        available["gemini"] = [
+            (
+                name,
+                ChatGoogleGenerativeAI(
+                    model=name, google_api_key=os.environ["GEMINI_API_KEY"], max_retries=1
+                ),
+            )
+            for name in configured_models(
+                "SIDEKICK_GEMINI_MODELS",
+                "GEMINI_MODEL",
+                ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"),
+            )
+        ]
     if _configured("GROQ_API_KEY"):
-        available["groq"] = ChatGroq(
-            model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
-            api_key=os.environ["GROQ_API_KEY"],
-            temperature=temperature,
-            max_retries=1,
-        )
+        available["groq"] = [
+            (
+                name,
+                ChatGroq(model=name, api_key=os.environ["GROQ_API_KEY"], temperature=temperature, max_retries=1),
+            )
+            for name in configured_models(
+                "SIDEKICK_GROQ_MODELS",
+                "GROQ_MODEL",
+                ("openai/gpt-oss-120b", "qwen/qwen3.8-27b"),
+            )
+        ]
     if _configured("OPENROUTER_API_KEY"):
-        available["openrouter"] = ChatOpenRouter(
-            model=os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b"),
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            temperature=temperature,
-            max_retries=1,
-            app_url=None,
-            app_title=None,
-        )
+        available["openrouter"] = [
+            (
+                name,
+                ChatOpenRouter(
+                    model=name,
+                    api_key=os.environ["OPENROUTER_API_KEY"],
+                    temperature=temperature,
+                    max_retries=1,
+                    app_url=None,
+                    app_title=None,
+                ),
+            )
+            for name in configured_models(
+                "SIDEKICK_OPENROUTER_MODELS",
+                "OPENROUTER_MODEL",
+                (
+                    "nvidia/nemotron-3-ultra-550b-a55b:free",
+                    "nvidia/nemotron-3-super-120b-a12b:free",
+                    "cohere/north-mini-code:free",
+                ),
+            )
+        ]
 
     requested = [
         item.strip().lower()
@@ -63,14 +103,16 @@ def build_models(*, temperature: float = 0) -> ModelSet:
     unknown = sorted(set(requested) - {"gemini", "groq", "openrouter"})
     if unknown:
         raise RuntimeError(f"Unknown providers in SIDEKICK_PROVIDER_ORDER: {', '.join(unknown)}")
-    providers = tuple(name for name in requested if name in available)
-    if not providers:
+    selected = [(provider, model_name, model) for provider in requested for model_name, model in available.get(provider, [])]
+    if not selected:
         raise RuntimeError(
             "No model provider is configured. Set GEMINI_API_KEY, GROQ_API_KEY, "
             "or OPENROUTER_API_KEY in .env."
         )
-    models = tuple(available[name] for name in providers)
-    return ModelSet(primary=models[0], fallbacks=models[1:], providers=providers)
+    providers = tuple(provider for provider, _, _ in selected)
+    labels = tuple(f"{provider}/{model_name}" for provider, model_name, _ in selected)
+    models = tuple(model for _, _, model in selected)
+    return ModelSet(primary=models[0], fallbacks=models[1:], providers=providers, labels=labels)
 
 
 def build_structured_evaluator(schema: type):
